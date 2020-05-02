@@ -34,9 +34,11 @@ public:
     // Return a copy of this term.
     virtual Term *copy() = 0;
 
-    virtual bool unify(Term *) = 0;
+    // Match this term to another one, and instantiate the variables.
+    virtual bool unify(Term *t) = 0;
 
-    virtual bool unify_compound(Compound *) = 0;
+    // Match this term to the gived compound, and instantiate the variables.
+    virtual bool unify_compound(Compound *c) = 0;
 
     // Print this term to cout.
     virtual void print() = 0;
@@ -88,6 +90,7 @@ public:
         }
     }
 
+    // Match this compound to the given term, and instantiate the variables.
     bool unify(Term *t) override { return t->unify_compound(this); }
 
     // Return a copy of this term.
@@ -105,6 +108,7 @@ private:
             args[i] = c->args[i]->copy();
     }
 
+    // Match this compound to another one, and instantiate the variables.
     bool unify_compound(Compound *c) override
     {
         if (!functor->equal(c->functor) || arity != c->arity)
@@ -120,7 +124,7 @@ private:
 
 //
 // Variables are placeholders for arbitrary terms.
-// A variable can become bound to a term via unification.
+// A variable can become instantiated (bound to a term) via unification.
 // Variables are identified by a unique index, assigned sequentially starting from 1.
 //
 class Variable : public Term {
@@ -134,6 +138,7 @@ public:
     // Unbind this variable.
     void reset() { instance = this; }
 
+    // Match this variable to the given term, and instantiate when appropriate.
     bool unify(Term *t) override;
 
     // Return a copy of this term.
@@ -149,7 +154,8 @@ public:
     };
 
 private:
-    bool unify_compound(Compound *t) override { return this->unify(t); }
+    // Match this variable to the given compound, and instantiate when appropriate.
+    bool unify_compound(Compound *c) override { return this->unify(c); }
 };
 
 unsigned Variable::timestamp = 0;
@@ -157,52 +163,67 @@ unsigned Variable::timestamp = 0;
 class Program;
 class VarMapping;
 
+//
+// Goal is a list of compounds:
+//      a(); b(); c()
+//
 class Goal {
-    Compound *car;
-    Goal *cdr;
+    Compound *head;
+    Goal *tail;
 
 public:
-    Goal(Compound *h, Goal *t) : car(h), cdr(t) {}
+    // Create a goal with given head and tail.
+    Goal(Compound *h, Goal *t = nullptr) : head(h), tail(t) {}
 
+    // Return a copy of this goal.
     Goal *copy()
     {
-        return new Goal(car->copy_compound(), cdr ? cdr->copy() : nullptr);
+        return new Goal(head->copy_compound(), tail ? tail->copy() : nullptr);
     }
 
+    // Append a goal to this list.
     Goal *append(Goal *l)
     {
-        return new Goal(car, cdr ? cdr->append(l) : nullptr);
+        return new Goal(head, tail ? tail->append(l) : nullptr);
     }
 
-    void solve(Program *p, int level, VarMapping *map);
+    // Solve the problem.
+    void solve(Program *prog, int level, VarMapping *vars);
 
+    // Print this list.
     void print()
     {
-        car->print();
-        if (cdr) {
-            std::cout << "; ", cdr->print();
+        head->print();
+        if (tail) {
+            std::cout << "; ", tail->print();
         }
     }
 
+    // Print n*4 spaces.
     static void indent(int n)
     {
         for (int i = 0; i < n; i++)
             std::cout << "    ";
     }
-
 };
 
+//
+// Clause consists of a head (compound) and a goal (list of compounds):
+//      head() :- a(); b(); c().
+//
 class Clause {
 public:
     Compound *head;
     Goal *body;
-    Clause(Compound *h, Goal *t) : head(h), body(t) {}
+    Clause(Compound *h, Goal *t = nullptr) : head(h), body(t) {}
 
+    // Return a copy of this clause.
     [[nodiscard]] Clause *copy() const
     {
         return new Clause(head->copy_compound(), body ? body->copy() : nullptr);
     }
 
+    // Print this clause.
     void print() const
     {
         head->print();
@@ -214,104 +235,149 @@ public:
     }
 };
 
+//
+// Program is a list of clauses.
+//
 class Program {
 public:
-    Clause *pcar;
-    Program *pcdr;
-    Program(Clause *h, Program *t) : pcar(h), pcdr(t) {}
+    Clause *head;
+    Program *tail;
+    Program(Clause *h, Program *t = nullptr) : head(h), tail(t) {}
 };
 
-class Trail {
-    Variable *tcar;
-    Trail *tcdr;
-    static Trail *sofar;
-    Trail(Variable *h, Trail *t) : tcar(h), tcdr(t) {}
+//
+// Trace records a sequence of variable instaitiations.
+//
+class Trace {
+    Variable *head;
+    Trace *tail;
+    static Trace *history;
+    Trace(Variable *h, Trace *t) : head(h), tail(t) {}
 
 public:
-    static Trail *Note() { return sofar; }
-    static void Push(Variable *x) { sofar = new Trail(x, sofar); }
+    // Return a current position of the trace.
+    static Trace *Note() { return history; }
 
-    static void Undo(Trail *whereto)
+    // Add a new variable to the trace.
+    static void Push(Variable *x)
     {
-        for (; sofar != whereto; sofar = sofar->tcdr)
-            sofar->tcar->reset();
+        history = new Trace(x, history);
+    }
+
+    // Reset all instantiations up to the given position.
+    static void Undo(Trace *whereto)
+    {
+        for (; history != whereto; history = history->tail)
+            history->head->reset();
     }
 };
 
-Trail *Trail::sofar = nullptr;
+Trace *Trace::history = nullptr;
 
+//
+// Bind this variable to the specified term.
+//
 bool Variable::unify(Term *t)
 {
-    if (instance != this)
-        return instance->unify(t);
+    if (instance == this) {
+        // The variable is uninstantiated.
+        // Bind it to this term.
+        Trace::Push(this);
+        instance = t;
+        return true;
+    }
 
-    Trail::Push(this);
-    instance = t;
-    return true;
+    // This variable is already instantiated.
+    // Redirect the request to the instance.
+    return instance->unify(t);
 }
 
+//
+// Return a term this variable is bound to.
+//
 Term *Variable::copy()
 {
     if (instance == this) {
-        Trail::Push(this);
+        // The variable is unbound.
+        // Bind it to a newly allocated variable.
+        Trace::Push(this);
         instance = new Variable();
     }
     return instance;
 }
 
+//
+// Table of variables and their names.
+//
 class VarMapping {
 private:
-    Variable **varvar;
-    std::string *vartext;
-    int size;
+    Variable **vars;
+    std::string *names;
+    int count;
 
 public:
-    VarMapping(Variable *vv[], std::string vt[], int vs) : varvar(vv), vartext(vt), size(vs) {}
+    VarMapping(Variable *vv[], std::string vt[], int vs) : vars(vv), names(vt), count(vs) {}
 
-    void showanswer()
+    // Print variables and their instantiations.
+    void show_answer()
     {
-        if (size == 0)
+        if (count == 0)
             std::cout << "yes\n";
         else {
-            for (int i = 0; i < size; i++) {
-                std::cout << vartext[i] << " = ";
-                varvar[i]->print();
+            for (int i = 0; i < count; i++) {
+                std::cout << names[i] << " = ";
+                vars[i]->print();
                 std::cout << "\n";
             }
         }
     }
 };
 
-void Goal::solve(Program *p, int level, VarMapping *map)
+//
+// Solve the problem.
+//
+void Goal::solve(Program *prog, int level, VarMapping *vars)
 {
     indent(level);
     std::cout << "solve@" << level << ": ";
     this->print();
     std::cout << "\n";
-    for (Program *q = p; q; q = q->pcdr) {
-        Trail *t = Trail::Note();
-        Clause *c = q->pcar->copy();
-        Trail::Undo(t);
+
+    //
+    // Iterate over the clauses of the program.
+    //
+    for (Program *iter = prog; iter; iter = iter->tail) {
+        Trace *tr = Trace::Note();
+        Clause *cl = iter->head->copy();
+        Trace::Undo(tr);
+
         indent(level);
         std::cout << "  try:";
-        c->print();
+        cl->print();
         std::cout << "\n";
-        if (car->unify(c->head)) {
-            Goal *gdash = c->body ? c->body->append(cdr) : cdr;
+
+        // Match the goal to the clause head.
+        if (head->unify(cl->head)) {
+
+            // Matched: extend the goal with the clause body and solve it,
+            // with the level incremented.
+            Goal *gdash = cl->body ? cl->body->append(tail) : tail;
             if (gdash)
-                gdash->solve(p, level + 1, map);
+                gdash->solve(prog, level + 1, vars);
             else
-                map->showanswer();
+                vars->show_answer();
         } else {
             indent(level);
             std::cout << "  nomatch.\n";
         }
-        Trail::Undo(t);
+
+        // Reset the variables bound at this iteration.
+        Trace::Undo(tr);
     }
 }
 
 //
-// A sample test program: append
+// A sample test program
 //
 int main()
 {
@@ -322,38 +388,60 @@ int main()
     auto *i_2 = new Compound(new Atom("2"));
     auto *i_3 = new Compound(new Atom("3"));
 
+    //
+    // Clause 1:
+    //      app(nil, x, x)
+    //
     auto *var_x = new Variable();
-    auto *lhs1 = new Compound(atom_app, nil, var_x, var_x);
-    auto *c1 = new Clause(lhs1, nullptr);
+    auto *app_nil_x_x = new Compound(atom_app, nil, var_x, var_x);
+    auto *clause_1 = new Clause(app_nil_x_x);
 
+    //
+    // Clause 2:
+    //      app([x|l], m, [x|n]); app(l, m, n)
+    //
     auto *var_l = new Variable();
     auto *var_m = new Variable();
     auto *var_n = new Variable();
-    auto *rhs2 = new Compound(atom_app, var_l, var_m, var_n);
-    auto *lhs2 = new Compound(atom_app, new Compound(atom_cons, var_x, var_l),
-                              var_m, new Compound(atom_cons, var_x, var_n));
-    auto *c2 = new Clause(lhs2, new Goal(rhs2, nullptr));
+    auto *app_l_m_n = new Compound(atom_app, var_l, var_m, var_n);
+    auto *app_xl_m_xn = new Compound(atom_app, new Compound(atom_cons, var_x, var_l),
+                                     var_m, new Compound(atom_cons, var_x, var_n));
+    auto *clause_2 = new Clause(app_xl_m_xn, new Goal(app_l_m_n));
 
+    //
+    // Goal:
+    //      app(i, j, [1, 2, 3])
     auto *var_i = new Variable();
     auto *var_j = new Variable();
-    auto *rhs3 = new Compound(atom_app, var_i, var_j,
-                              new Compound(atom_cons, i_1,
+    auto *app_i_j_123 = new Compound(atom_app, var_i, var_j,
+                                     new Compound(atom_cons, i_1,
                                            new Compound(atom_cons, i_2,
                                                         new Compound(atom_cons, i_3, nil))));
+    auto *goal = new Goal(app_i_j_123);
 
-    auto *g1 = new Goal(rhs3, nullptr);
+    //
+    // Two test programs.
+    //
+    auto *prog_1 = new Program(clause_1, new Program(clause_2));
+    auto *prog_2 = new Program(clause_2, new Program(clause_1));
 
-    auto *test_p = new Program(c1, new Program(c2, nullptr));
-    auto *test_p2 = new Program(c2, new Program(c1, nullptr));
-
+    //
+    // Two variables in the goal: I and J.
+    //
     Variable *vars[] = { var_i, var_j };
     std::string names[] = { "I", "J" };
     auto *var_name_map = new VarMapping(vars, names, 2);
 
-    std::cout << "=======Append with normal clause order:\n";
-    g1->solve(test_p, 0, var_name_map);
+    //
+    // Run program 1.
+    //
+    std::cout << "=== Normal clause order:\n";
+    goal->solve(prog_1, 0, var_name_map);
 
-    std::cout << "\n=======Append with reversed normal clause order:\n";
-    g1->solve(test_p2, 0, var_name_map);
+    //
+    // Run program 2.
+    //
+    std::cout << "\n=== Reversed clause order:\n";
+    goal->solve(prog_2, 0, var_name_map);
     return 0;
 }
